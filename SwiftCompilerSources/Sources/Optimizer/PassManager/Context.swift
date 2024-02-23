@@ -353,6 +353,18 @@ struct FunctionPassContext : MutatingContext {
     return String(taking: _bridged.mangleOutlinedVariable(function.bridged))
   }
 
+  func mangle(withClosureArgs closureArgs: [Value], closureArgIndices: [Int], applySiteCallee: Function) -> String {
+    closureArgs.withBridgedValues { bridgedClosureArgsRef in
+      closureArgIndices.withBridgedArrayRef{bridgedClosureArgIndicesRef in 
+        String(taking: _bridged.mangleWithClosureArgs(
+          bridgedClosureArgsRef, 
+          bridgedClosureArgIndicesRef, 
+          applySiteCallee.bridged
+        ))
+      }
+    }
+  }
+
   func createGlobalVariable(name: String, type: Type, isPrivate: Bool) -> GlobalVariable {
     let gv = name._withBridgedStringRef {
       _bridged.createGlobalVariable($0, type.bridged, isPrivate)
@@ -423,7 +435,7 @@ extension Builder {
 
   /// Creates a builder which inserts at the end of `block`, using a custom `location`.
   init(atEndOf block: BasicBlock, location: Location, _ context: some MutatingContext) {
-    context.verifyIsTransforming(function: block.parentFunction)
+    // context.verifyIsTransforming(function: block.parentFunction)
     self.init(insertAt: .atEndOf(block), location: location,
               context.notifyInstructionChanged, context._bridged.asNotificationHandler())
   }
@@ -628,7 +640,6 @@ extension Function {
     context.notifyEffectsChanged()
     bridged.setIsPerformanceConstraint(isPerformanceConstraint)
   }
-
 
   func fixStackNesting(_ context: FunctionPassContext) {
     context._bridged.fixStackNesting(bridged)

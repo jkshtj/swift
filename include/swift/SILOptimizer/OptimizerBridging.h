@@ -56,6 +56,7 @@ class SwiftPassInvocation;
 class FixedSizeSlabPayload;
 class FixedSizeSlab;
 class SILVTable;
+class ClosureSpecializationCloner;
 }
 
 struct BridgedPassContext;
@@ -178,6 +179,15 @@ struct BridgedCloner {
   SWIFT_IMPORT_UNSAFE BridgedValue getClonedValue(BridgedValue v);
   bool isValueCloned(BridgedValue v) const;
   void clone(BridgedInstruction inst);
+};
+
+struct BridgedClosureSpecializationCloner {
+  swift::ClosureSpecializationCloner * _Nonnull closureSpecCloner;
+
+  BridgedClosureSpecializationCloner(BridgedFunction emptySpecializedFunction);
+  BridgedFunction getCloned() const;
+  BridgedBasicBlock getClonedBasicBlock(BridgedBasicBlock originalBasicBlock) const;
+  void cloneFunctionBody(BridgedFunction originalFunction, BridgedBasicBlock clonedEntryBlock, BridgedValueArray clonedEntryBlockArgs) const;
 };
 
 struct BridgedPassContext {
@@ -347,6 +357,13 @@ struct BridgedPassContext {
   BRIDGED_INLINE bool enableMoveInoutStackProtection() const;
   BRIDGED_INLINE AssertConfiguration getAssertConfiguration() const;
   bool enableSimplificationFor(BridgedInstruction inst) const;
+
+  // Closure specializer
+  SWIFT_IMPORT_UNSAFE BridgedFunction ClosureSpecializer_createEmptyFunctionWithSpecializedSignature(BridgedStringRef specializedName,
+                                                        const BridgedParameterInfo * _Nullable specializedBridgedParams,
+                                                        SwiftInt paramCount,
+                                                        BridgedFunction bridgedApplySiteCallee,
+                                                        bool isSerialized) const;
 };
 
 bool FullApplySite_canInline(BridgedInstruction apply);

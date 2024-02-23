@@ -148,6 +148,18 @@ public struct Builder {
   }
 
   @discardableResult
+  public func createRetainValue(operand: Value) -> RetainValueInst {
+    let retain = bridged.createRetainValue(operand.bridged)
+    return notifyNew(retain.getAs(RetainValueInst.self))
+  }
+
+  @discardableResult
+  public func createReleaseValue(operand: Value) -> ReleaseValueInst {
+    let release = bridged.createReleaseValue(operand.bridged)
+    return notifyNew(release.getAs(ReleaseValueInst.self))
+  }
+
+  @discardableResult
   public func createStrongRetain(operand: Value) -> StrongRetainInst {
     let retain = bridged.createStrongRetain(operand.bridged)
     return notifyNew(retain.getAs(StrongRetainInst.self))
@@ -288,6 +300,20 @@ public struct Builder {
   public func createThinToThickFunction(thinFunction: Value, resultType: Type) -> ThinToThickFunctionInst {
     let tttf = bridged.createThinToThickFunction(thinFunction.bridged, resultType.bridged)
     return notifyNew(tttf.getAs(ThinToThickFunctionInst.self))
+  }
+
+  public func createPartialApply(
+    forFunction function: Value,
+    substitutionMap: SubstitutionMap, 
+    capturedArgs: [Value], 
+    calleeConvention: ArgumentConvention, 
+    hasUnknownResultIsolation: Bool, 
+    isOnStack: Bool
+  ) -> PartialApplyInst {
+    return capturedArgs.withBridgedValues { capturedArgsRef in
+      let pai = bridged.createPartialApply(function.bridged, capturedArgsRef, calleeConvention.bridged, substitutionMap.bridged, hasUnknownResultIsolation, isOnStack)
+      return notifyNew(pai.getAs(PartialApplyInst.self))
+    }
   }
 
   @discardableResult
@@ -433,5 +459,13 @@ public struct Builder {
   public func createEndAccess(beginAccess: BeginAccessInst) -> EndAccessInst {
       let endAccess = bridged.createEndAccess(beginAccess.bridged)
       return notifyNew(endAccess.getAs(EndAccessInst.self))
+  }
+
+  public func createConvertFunction(originalFunction: Value, resultType: Type, withoutActuallyEscaping: Bool) -> ConvertFunctionInst {
+    fatalError()
+  }
+
+  public func createConvertEscapeToNoEscape(originalFunction: Value, resultType: Type, isLifetimeGuaranteed: Bool) -> ConvertFunctionInst {
+    fatalError()
   }
 }

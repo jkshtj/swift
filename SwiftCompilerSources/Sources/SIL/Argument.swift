@@ -69,6 +69,10 @@ final public class FunctionArgument : Argument {
   public var resultDependence: LifetimeDependenceConvention? {
     parentFunction.argumentConventions[resultDependsOn: index]
   }
+
+  public func copyFlags(of arg: FunctionArgument) {
+    bridged.copyFlags(arg.bridged)
+  }
 }
 
 public struct Phi {
@@ -442,6 +446,15 @@ public enum ArgumentConvention : CustomStringConvertible {
          .indirectInout, .indirectInoutAliasable, .indirectOut,
          .packOut, .packInout, .packOwned:
       return false
+    }
+  }
+
+  public var isConsumed: Bool {
+    switch self {
+      case .indirectIn, .directOwned, .packOwned:
+        return true
+      default:
+        return false
     }
   }
 

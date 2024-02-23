@@ -178,6 +178,11 @@ extension Builder {
       insertFunc(builder)
     }
   }
+
+  func destroyCapturedArgs(for paiOnStack: PartialApplyInst) {
+    precondition(paiOnStack.isOnStack, "Function must only be called for `partial_apply`s on stack!")
+    self.bridged.destroyCapturedArgs(paiOnStack.bridged)
+  }
 }
 
 extension Value {

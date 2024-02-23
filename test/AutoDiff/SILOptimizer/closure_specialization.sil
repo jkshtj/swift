@@ -10,8 +10,6 @@ import SwiftShims
 
 import _Differentiation
 
-// ===================== Gathering callsites and corresponding closures ===================== //
-
 //////////////////////////////
 // Single closure call site //
 //////////////////////////////
@@ -34,11 +32,24 @@ bb0(%0 : $Float, %1 : $@callee_guaranteed (Float) -> (Float, Float)):
 // reverse-mode derivative of f(_:)
 sil hidden @$s4test1fyS2fFTJrSpSr : $@convention(thin) (Float) -> (Float, @owned @callee_guaranteed (Float) -> Float) {
 bb0(%0 : $Float):
+  //=========== Test callsite and closure gathering logic ===========//
   specify_test "closure_specialize_gather_call_sites"
   // CHECK-LABEL: Specializing closures in function: $s4test1fyS2fFTJrSpSr
   // CHECK: PartialApply call site:   %8 = partial_apply [callee_guaranteed] %7(%6) : $@convention(thin) (Float, @owned @callee_guaranteed (Float) -> (Float, Float)) -> Float // user: %9
   // CHECK: Passed in closures:
   // CHECK: 1.   %6 = partial_apply [callee_guaranteed] %5(%0, %0) : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %8
+
+
+ //=========== Test specialized function signature and body ===========//
+  specify_test "closure_specialize_specialized_function_signature_and_body"
+  // CHECK-LABEL: Generated specialized function: $s11$pullback_f12$vjpMultiplyS2fTf1nc_n
+  // CHECK: sil private @$s11$pullback_f12$vjpMultiplyS2fTf1nc_n : $@convention(thin) (Float, Float, Float) -> Float {
+  // CHECK: bb0(%0 : $Float, %1 : $Float, %2 : $Float):
+  // CHECK: %3 = function_ref @$vjpMultiply : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %4
+  // CHECK: %4 = partial_apply [callee_guaranteed] %3(%1, %2) : $@convention(thin) (Float, Float, Float) -> (Float, Float) // users: %6, %5
+  // CHECK: %5 = apply %4(%0) : $@callee_guaranteed (Float) -> (Float, Float) // users: %8, %7
+  // CHECK: strong_release %4 : $@callee_guaranteed (Float) -> (Float, Float) // id: %6
+  // CHECK: return
 
   debug_value %0 : $Float, let, name "x", argno 1 // id: %1
   %2 = struct_extract %0 : $Float, #Float._value  // users: %3, %3
@@ -57,9 +68,8 @@ bb0(%0 : $Float):
 ///////////////////////////////
 // Multiple closure callsite //
 ///////////////////////////////
-sil @$_vjpSin : $@convention(thin) (Float, Float) -> Float // user: %6
-sil @$_vjpCos : $@convention(thin) (Float, Float) -> Float // user: %10
-sil @$_vjpMultiply : $@convention(thin) (Float, Float, Float) -> (Float, Float)
+sil @$vjpSin : $@convention(thin) (Float, Float) -> Float // user: %6
+sil @$vjpCos : $@convention(thin) (Float, Float) -> Float // user: %10
 
 // pullback of g(_:)
 sil private @$pullback_g : $@convention(thin) (Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> (Float, Float)) -> Float {
@@ -83,6 +93,7 @@ bb0(%0 : $Float, %1 : $@callee_guaranteed (Float) -> Float, %2 : $@callee_guaran
 // reverse-mode derivative of g(_:)
 sil hidden @$s4test1gyS2fFTJrSpSr : $@convention(thin) (Float) -> (Float, @owned @callee_guaranteed (Float) -> Float) {
 bb0(%0 : $Float):
+  //=========== Test callsite and closure gathering logic ===========//
   specify_test "closure_specialize_gather_call_sites"
   // CHECK-LABEL: Specializing closures in function: $s4test1gyS2fFTJrSpSr
   // CHECK: PartialApply call site:   %16 = partial_apply [callee_guaranteed] %15(%6, %10, %14) : $@convention(thin) (Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> (Float, Float)) -> Float // user: %17
@@ -91,22 +102,41 @@ bb0(%0 : $Float):
   // CHECK: 2.   %10 = partial_apply [callee_guaranteed] %9(%0) : $@convention(thin) (Float, Float) -> Float // user: %16
   // CHECK: 3.   %14 = partial_apply [callee_guaranteed] %13(%8, %4) : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %16
 
+  //=========== Test specialized function signature and body ===========//
+  specify_test "closure_specialize_specialized_function_signature_and_body"
+  // CHECK-LABEL: Generated specialized function: $s11$pullback_g7$vjpSinSf0B3CosSf0B8MultiplyS2fTf1nccc_n
+  // CHECK: sil private @$s11$pullback_g7$vjpSinSf0B3CosSf0B8MultiplyS2fTf1nccc_n : $@convention(thin) (Float, Float, Float, Float, Float) -> Float {
+  // CHECK: bb0(%0 : $Float, %1 : $Float, %2 : $Float, %3 : $Float, %4 : $Float):
+  // CHECK: %5 = function_ref @$vjpSin : $@convention(thin) (Float, Float) -> Float // user: %6
+  // CHECK: %6 = partial_apply [callee_guaranteed] %5(%1) : $@convention(thin) (Float, Float) -> Float // users: %18, %17
+  // CHECK: %7 = function_ref @$vjpCos : $@convention(thin) (Float, Float) -> Float // user: %8
+  // CHECK: %8 = partial_apply [callee_guaranteed] %7(%2) : $@convention(thin) (Float, Float) -> Float // users: %16, %15
+  // CHECK: %9 = function_ref @$vjpMultiply : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %10
+  // CHECK: %10 = partial_apply [callee_guaranteed] %9(%3, %4) : $@convention(thin) (Float, Float, Float) -> (Float, Float) // users: %12, %11
+  // CHECK: %11 = apply %10(%0) : $@callee_guaranteed (Float) -> (Float, Float) // users: %14, %13
+  // CHECK: strong_release %10 : $@callee_guaranteed (Float) -> (Float, Float) // id: %12
+  // CHECK: %15 = apply %8(%14) : $@callee_guaranteed (Float) -> Float // user: %19
+  // CHECK: strong_release %8 : $@callee_guaranteed (Float) -> Float // id: %16
+  // CHECK: %17 = apply %6(%13) : $@callee_guaranteed (Float) -> Float // user: %20
+  // CHECK: strong_release %6 : $@callee_guaranteed (Float) -> Float // id: %18
+  // CHECK: return  
+
   debug_value %0 : $Float, let, name "x", argno 1 // id: %1
   %2 = struct_extract %0 : $Float, #Float._value  // users: %7, %3
   %3 = builtin "int_sin_FPIEEE32"(%2 : $Builtin.FPIEEE32) : $Builtin.FPIEEE32 // users: %11, %4
   %4 = struct $Float (%3 : $Builtin.FPIEEE32)     // user: %14
   // function_ref closure #1 in _vjpSin(_:)
-  %5 = function_ref @$_vjpSin : $@convention(thin) (Float, Float) -> Float // user: %6
+  %5 = function_ref @$vjpSin : $@convention(thin) (Float, Float) -> Float // user: %6
   %6 = partial_apply [callee_guaranteed] %5(%0) : $@convention(thin) (Float, Float) -> Float // user: %16
   %7 = builtin "int_cos_FPIEEE32"(%2 : $Builtin.FPIEEE32) : $Builtin.FPIEEE32 // users: %11, %8
   %8 = struct $Float (%7 : $Builtin.FPIEEE32)     // user: %14
   // function_ref closure #1 in _vjpCos(_:)
-  %9 = function_ref @$_vjpCos : $@convention(thin) (Float, Float) -> Float // user: %10
+  %9 = function_ref @$vjpCos : $@convention(thin) (Float, Float) -> Float // user: %10
   %10 = partial_apply [callee_guaranteed] %9(%0) : $@convention(thin) (Float, Float) -> Float // user: %16
   %11 = builtin "fmul_FPIEEE32"(%3 : $Builtin.FPIEEE32, %7 : $Builtin.FPIEEE32) : $Builtin.FPIEEE32 // user: %12
   %12 = struct $Float (%11 : $Builtin.FPIEEE32)   // user: %17
   // function_ref closure #1 in static Float._vjpMultiply(lhs:rhs:)
-  %13 = function_ref @$_vjpMultiply : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %14
+  %13 = function_ref @$vjpMultiply : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %14
   %14 = partial_apply [callee_guaranteed] %13(%8, %4) : $@convention(thin) (Float, Float, Float) -> (Float, Float) // user: %16
   // function_ref pullback of g(_:)
   %15 = function_ref @$pullback_g : $@convention(thin) (Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> Float, @owned @callee_guaranteed (Float) -> (Float, Float)) -> Float // user: %16

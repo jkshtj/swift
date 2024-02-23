@@ -95,6 +95,7 @@
 /// }
 /// ```
 
+import OptimizerBridging
 import SIL
 
 private let verbose = false
@@ -182,6 +183,33 @@ private func gatherCallSites(in caller: Function, _ context: FunctionPassContext
   }
 
   return callSiteMap.callSites
+}
+
+private func createEmptySpecializedFunction(basedOn callSite: CallSite, _ context: FunctionPassContext) -> Function {
+  let applySiteCallee = callSite.applyCallee
+  let specializedParameters = applySiteCallee.convention.getSpecializedParameters(basedOn: callSite)
+
+  return context.createEmptyFuncWithSpecializedSignature(
+    specializedFunctionName: callSite.specializedCalleeName(context),
+    specializedParameters: specializedParameters,
+    from: applySiteCallee,
+    isSerialized: applySiteCallee.isSerialized
+  )
+}
+
+private func populateBody(of specializedFunction: Function, basedOn callSite: CallSite, _ context: FunctionPassContext)
+{
+  let closureSpecCloner = ClosureSpecializationCloner(emptySpecializedFunction: specializedFunction, context)
+
+  let didInvalidateStackNesting = closureSpecCloner.cloneAndSpecializeFunctionBody(using: callSite)
+  
+  if didInvalidateStackNesting {
+    closureSpecCloner.cloned.fixStackNesting(context)
+  }
+}
+
+private func rewriteApplyInstruction(in caller: Function, _ context: FunctionPassContext) {
+  fatalError("Not implemented")
 }
 
 // ===================== Utility functions and extensions ===================== //
@@ -559,6 +587,395 @@ private func markConvertedAndReabstractedClosuresAsUsed(rootClosure: Value, conv
   }
 }
 
+private extension ClosureSpecializationCloner {
+  var entryBlock: BasicBlock {
+    if self.cloned.blocks.isEmpty {
+      self.cloned.appendNewBlock(self.context)
+    } else {
+      self.cloned.entryBlock
+    }
+  }
+
+  typealias DidInvalidateStackNesting = Bool
+
+  func cloneAndSpecializeFunctionBody(using callSite: CallSite) -> DidInvalidateStackNesting {
+    self.cloneEntryBlockArgsWithoutOrigClosures(usingOrigCalleeAt: callSite)
+
+    let (entryBlockArgs, closureArgIndexToClonedRootClosure, closureArgIndexToReleaseList) = 
+      cloneAllClosures(at: callSite)
+
+    self.cloneRemainingBody(from: callSite.applyCallee, entryBlockArgs: entryBlockArgs)
+
+    return self.insertCleanupCodeForClosures(from: callSite, 
+                                             closureArgIndexToClonedRootClosure: closureArgIndexToClonedRootClosure,
+                                             closureArgIndexToReleaseList: closureArgIndexToReleaseList)
+  }
+
+  private func cloneEntryBlockArgsWithoutOrigClosures(usingOrigCalleeAt callSite: CallSite) {
+    let originalEntryBlock = callSite.applyCallee.entryBlock
+    let clonedFunction = self.cloned
+    let clonedEntryBlock = self.entryBlock
+
+    originalEntryBlock.arguments
+      .enumerated()
+      .filter { index, _ in !callSite.hasClosureArg(at: index) }
+      .forEach { _, arg in
+        let clonedEntryBlockArgType = clonedFunction.loweredType(of: arg.type)
+        let clonedEntryBlockArg = clonedEntryBlock.addFunctionArgument(type: clonedEntryBlockArgType, context)
+        clonedEntryBlockArg.copyFlags(of: arg as! FunctionArgument)
+      }
+  }
+
+  private func cloneAllClosures(at callSite: CallSite) 
+    -> (entryBlockArgs: [Value], closureArgIndexToClonedRootClosure: [Int: SingleValueInstruction], 
+        closureArgIndexToReleaseList: [Int: [PartialApplyInst]]) 
+  {
+    func entryBlockArgsWithOrigClosuresSkipped() -> [Value] {
+      var clonedNonClosureEntryBlockArgs = self.entryBlock.arguments.makeIterator()
+
+      return callSite.applyCallee
+        .entryBlock
+        .arguments
+        .enumerated()
+        .reduce(into: []) { result, origArgTuple in
+          let (index, _) = origArgTuple
+          if !callSite.hasClosureArg(at: index) {
+            result.append(clonedNonClosureEntryBlockArgs.next()!)
+          } else {
+            result.append(PlaceholderValue())
+          }
+        }
+    }
+
+    var entryBlockArgs: [Value] = entryBlockArgsWithOrigClosuresSkipped()
+    var closureArgIndexToClonedRootClosure: [Int: SingleValueInstruction] = [:]
+    var closureArgIndexToReleaseList: [Int: [PartialApplyInst]] = [:]
+
+    for closureArgDesc in callSite.closureArgDescriptors {
+      let (clonedRootClosure, clonedReabstractedClosure, releaseList) =
+        self.cloneClosure(representedBy: closureArgDesc, at: callSite)
+
+      entryBlockArgs[closureArgDesc.closureArgIndex] = clonedReabstractedClosure
+      closureArgIndexToClonedRootClosure[closureArgDesc.closureArgIndex] = clonedRootClosure
+      closureArgIndexToReleaseList[closureArgDesc.closureArgIndex] = releaseList
+    }
+
+    return (entryBlockArgs, closureArgIndexToClonedRootClosure, closureArgIndexToReleaseList)
+  }
+
+  private func cloneClosure(representedBy closureArgDesc: ClosureArgDescriptor, at callSite: CallSite) 
+    -> (clonedRootClosure: SingleValueInstruction, clonedReabstractedClosure: SingleValueInstruction, 
+        releaseList: [PartialApplyInst]) 
+  {
+    let (origToClonedValueMap, capturedArgRange) = self.addEntryBlockArgs(forValuesCapturedBy: closureArgDesc)
+
+    let clonedEntryBlock = self.entryBlock
+    let clonedClosureArgs = Array(clonedEntryBlock.arguments[capturedArgRange])
+
+    let location = clonedEntryBlock.instructions.isEmpty 
+                   ? Location.compilerGenerated 
+                   : clonedEntryBlock.instructions.last!.location
+
+    let builder = Builder(atEndOf: clonedEntryBlock, location: location, self.context)
+
+    let clonedRootClosure = builder.cloneRootClosure(representedBy: closureArgDesc, capturedArgs: clonedClosureArgs)
+
+    let (clonedReabstractedClosure, releaseList) = 
+      builder.cloneRootClosureReabstractions(rootClosure: closureArgDesc.closure, clonedRootClosure: clonedRootClosure,
+                                             reabstractedClosure: callSite
+                                                                    .appliedArgForClosure(
+                                                                      at: closureArgDesc.closureArgIndex)!,
+                                             origToClonedValueMap: origToClonedValueMap,
+                                             self.context)
+
+    return (clonedRootClosure, clonedReabstractedClosure, releaseList)
+  }
+
+  private func addEntryBlockArgs(forValuesCapturedBy closureArgDesc: ClosureArgDescriptor) 
+    -> (origToClonedValueMap: [HashableValue: Value], capturedArgRange: Range<Int>) 
+  {
+    var origToClonedValueMap: [HashableValue: Value] = [:]
+    var capturedArgRange = 0..<0
+    let clonedFunction = self.cloned
+    let clonedEntryBlock = self.entryBlock
+
+    if let capturedArgs = closureArgDesc.arguments {
+      let capturedArgRangeStart = clonedEntryBlock.arguments.count
+
+      for arg in capturedArgs {
+        let capturedArg = clonedEntryBlock.addFunctionArgument(type: clonedFunction.loweredType(of: arg.type), context)
+        origToClonedValueMap[arg] = capturedArg
+      }
+
+      let capturedArgRangeEnd = clonedEntryBlock.arguments.count
+      capturedArgRange = capturedArgRangeStart..<capturedArgRangeEnd
+    }
+
+    return (origToClonedValueMap, capturedArgRange)
+  }
+
+  private func insertCleanupCodeForClosures(from callSite: CallSite, 
+                                            closureArgIndexToClonedRootClosure: [Int: SingleValueInstruction],
+                                            closureArgIndexToReleaseList: [Int: [PartialApplyInst]]) 
+    -> DidInvalidateStackNesting 
+  {
+    var invalidatedStackNesting = false
+
+    for closureArgDesc in callSite.closureArgDescriptors {
+      let clonedRootClosure = closureArgIndexToClonedRootClosure[closureArgDesc.closureArgIndex]!
+      let releaseList = closureArgIndexToReleaseList[closureArgDesc.closureArgIndex]!
+
+      // Then insert a release in all reachable exit BBs if our partial apply was guaranteed. This is b/c it was passed
+      // at +0 originally and we need to balance the initial increment of the newly created closure(s).
+      if closureArgDesc.isClosureGuaranteed || closureArgDesc.isCalleeTrivialNoEscape,
+        !releaseList.isEmpty
+      {
+        for exitBlock in closureArgDesc.reachableExitBBs {
+          let clonedExitBlock = self.getClonedBlock(for: exitBlock)
+
+          let builder = if clonedExitBlock.terminator is UnreachableInst {
+            Builder(before: clonedExitBlock.terminator.previous! as! ApplyInst, context)
+          } else {
+            Builder(atEndOf: clonedExitBlock, location: clonedExitBlock.terminator.location, context)
+          }
+
+          if closureArgDesc.isPartialApplyOnStack {
+            let pai = clonedRootClosure as! PartialApplyInst
+            invalidatedStackNesting = invalidatedStackNesting || builder.destroyPartialApplyOnStack(paiOnStack: pai)
+          } else {
+            builder.createReleaseValue(operand: clonedRootClosure)
+          }
+
+          for pai in releaseList {
+            if pai.isOnStack {
+              invalidatedStackNesting = invalidatedStackNesting || builder.destroyPartialApplyOnStack(paiOnStack: pai)
+            } else {
+              builder.createReleaseValue(operand: pai)
+            }
+          }
+        }
+      }
+    }
+
+    return invalidatedStackNesting
+  }
+}
+
+private extension [HashableValue: Value] {
+  subscript(key: Value) -> Value? {
+    get {
+      self[HashableValue(key)]
+    }
+    set {
+      self[HashableValue(key)] = newValue
+    }
+  }
+}
+
+private extension Builder {
+  func cloneRootClosure(representedBy closureArgDesc: ClosureArgDescriptor, capturedArgs: [Value]) 
+    -> SingleValueInstruction 
+  {
+    let function = self.createFunctionRef(closureArgDesc.callee)
+
+    if let pai = closureArgDesc.closure as? PartialApplyInst {
+      return self.createPartialApply(forFunction: function, substitutionMap: SubstitutionMap(), 
+                                     capturedArgs: capturedArgs, calleeConvention: pai.calleeConvention,
+                                     hasUnknownResultIsolation: pai.hasUnknownResultIsolation, 
+                                     isOnStack: pai.isOnStack)
+    } else {
+      return self.createThinToThickFunction(thinFunction: function, resultType: closureArgDesc.closure.type)
+    }
+  }
+
+  func cloneRootClosureReabstractions(rootClosure: Value, clonedRootClosure: Value, reabstractedClosure: Value,
+                                      origToClonedValueMap: [HashableValue: Value], _ context: FunctionPassContext) 
+    -> (SingleValueInstruction, [PartialApplyInst]) 
+  {
+    func inner(_ rootClosure: Value, _ clonedRootClosure: Value, _ reabstractedClosure: Value, 
+               _ releaseList: inout [PartialApplyInst], _ origToClonedValueMap: inout [HashableValue: Value]) 
+      -> Value 
+    {
+      if reabstractedClosure == rootClosure {
+        origToClonedValueMap[reabstractedClosure] = clonedRootClosure
+        return clonedRootClosure
+      }
+
+      if let cvt = reabstractedClosure as? ConvertFunctionInst {
+        let toBeReabstracted = inner(rootClosure, clonedRootClosure, cvt.operand.value, &releaseList, 
+                                     &origToClonedValueMap)
+
+        let reabstracted = self.createConvertFunction(originalFunction: toBeReabstracted, resultType: cvt.type, 
+                                                      withoutActuallyEscaping: cvt.withoutActuallyEscaping)
+
+        origToClonedValueMap[cvt] = reabstracted
+        return reabstracted
+      }
+
+      if let cvt = reabstractedClosure as? ConvertEscapeToNoEscapeInst {
+        let toBeReabstracted = inner(rootClosure, clonedRootClosure, cvt.operand.value, &releaseList, 
+                                     &origToClonedValueMap)
+
+        let reabstracted = self.createConvertEscapeToNoEscape(originalFunction: toBeReabstracted, resultType: cvt.type,
+                                                              isLifetimeGuaranteed: true)
+
+        origToClonedValueMap[cvt] = reabstracted
+        return reabstracted
+      }
+
+      if let pai = reabstractedClosure as? PartialApplyInst {
+        let toBeReabstracted = inner(rootClosure, clonedRootClosure, pai.callee, &releaseList, &origToClonedValueMap)
+
+        guard let function = pai.referencedFunction else {
+          fatalError("Encountered unsupported reabstraction (via partial_apply) of root closure!")
+        }
+
+        let fri = self.createFunctionRef(function)
+        let reabstracted = self.createPartialApply(forFunction: fri, substitutionMap: SubstitutionMap(), 
+                                                   capturedArgs: [toBeReabstracted], 
+                                                   calleeConvention: pai.calleeConvention, 
+                                                   hasUnknownResultIsolation: pai.hasUnknownResultIsolation, 
+                                                   isOnStack: pai.isOnStack)
+
+        releaseList.append(reabstracted)
+        origToClonedValueMap[pai] = reabstracted
+        return reabstracted
+      }
+
+      if let mdi = reabstractedClosure as? MarkDependenceInst {
+        let toBeReabstracted = inner(rootClosure, clonedRootClosure, mdi.value, &releaseList, &origToClonedValueMap)
+
+        if let base = origToClonedValueMap[mdi.base] {
+          let reabstracted = self.createMarkDependence(value: toBeReabstracted, base: base, kind: .Escaping)
+          origToClonedValueMap[mdi] = reabstracted
+          return reabstracted
+        }
+      }
+
+      fatalError("Encountered unsupported reabstraction of root closure: \(reabstractedClosure)")
+    }
+
+    var releaseList: [PartialApplyInst] = []
+    var origToClonedValueMap = origToClonedValueMap
+    let clonedReabstractedClosure = inner(rootClosure, clonedRootClosure, reabstractedClosure, &releaseList, 
+                                          &origToClonedValueMap)
+    return (clonedReabstractedClosure as! SingleValueInstruction, releaseList)
+  }
+
+  func destroyPartialApplyOnStack(paiOnStack: PartialApplyInst) -> Bool {
+    precondition(paiOnStack.isOnStack, "Function must only be called for `partial_apply`s on stack!")
+
+    if paiOnStack.parentFunction.hasOwnership {
+      // Under OSSA, the closure acts as an owned value whose lifetime is a borrow scope for the captures, so we need to
+      // end the borrow scope before ending the lifetimes of the captures themselves.
+      self.createDestroyValue(operand: paiOnStack)
+      self.destroyCapturedArgs(for: paiOnStack)
+      // The stack slot for the partial_apply doesn't get reified until after OSSA.
+      return false
+    } else {
+      self.destroyCapturedArgs(for: paiOnStack)
+      self.createDeallocStack(paiOnStack)
+      return true
+    }
+  }
+}
+
+private extension FunctionPassContext {
+  func createEmptyFuncWithSpecializedSignature(specializedFunctionName: String, specializedParameters: [ParameterInfo],
+                                               from applySiteCallee: Function, isSerialized: Bool) -> Function {
+    return specializedFunctionName._withBridgedStringRef { nameRef in
+      let bridgedParamInfos = specializedParameters.map { $0._bridged }
+
+      return bridgedParamInfos.withUnsafeBufferPointer { paramBuf in
+        _bridged.ClosureSpecializer_createEmptyFunctionWithSpecializedSignature(nameRef, paramBuf.baseAddress, 
+                                                                                paramBuf.count, 
+                                                                                applySiteCallee.bridged, 
+                                                                                isSerialized).function
+      }
+    }
+  }
+}
+
+private extension FunctionConvention {
+  func getSpecializedParameters(basedOn callSite: CallSite) -> [ParameterInfo] {
+    let applySiteCallee = callSite.applyCallee
+    var specializedParamInfoList: [ParameterInfo] = []
+
+    // Start by adding all original parameters except for the closure parameters.
+    let firstParamIndex = applySiteCallee.argumentConventions.firstParameterIndex
+    for (index, paramInfo) in applySiteCallee.convention.parameters.enumerated() {
+      let argIndex = index + firstParamIndex
+      if !callSite.hasClosureArg(at: argIndex) {
+        specializedParamInfoList.append(paramInfo)
+      }
+    }
+
+    // Now, append parameters captured by each of the original closure parameter.
+    //
+    // Captured parameters are always appended to the function signature. If the argument type of the captured 
+    // parameter in the callee is:
+    // - direct and trivial, pass the new parameter as Direct_Unowned.
+    // - direct and non-trivial, pass the new parameter as Direct_Owned.
+    // - indirect, pass the new parameter using the same parameter convention as in
+    //   the original closure.
+    for closureArgDesc in callSite.closureArgDescriptors {
+      if let closure = closureArgDesc.closure as? PartialApplyInst {
+        let closureCallee = closureArgDesc.callee
+        let closureCalleeConvention = closureCallee.convention
+        let unappliedArgumentCount = closure.unappliedArgumentCount
+
+        let prevCapturedParameters =
+          closureCalleeConvention
+          .parameters[unappliedArgumentCount...]
+          .enumerated()
+          .map { index, paramInfo in
+            let argIndexOfParam = closureCallee.argumentConventions.firstParameterIndex + unappliedArgumentCount + index
+            let argType = closureCallee.argumentTypes[argIndexOfParam]
+            return paramInfo.withSpecializedConvention(isArgTypeTrivial: argType.isTrivial(in: closureCallee))
+          }
+
+        specializedParamInfoList.append(contentsOf: prevCapturedParameters)
+      }
+    }
+
+    return specializedParamInfoList
+  }
+}
+
+private extension ParameterInfo {
+  func withSpecializedConvention(isArgTypeTrivial: Bool) -> Self {
+    let specializedParamConvention =
+      if self.hasAllowedIndirectConvForClosureSpec {
+        self.convention
+      } else {
+        isArgTypeTrivial ? ArgumentConvention.directUnowned : ArgumentConvention.directOwned
+      }
+
+    return ParameterInfo(type: self.type, convention: specializedParamConvention, options: self.options, 
+                         hasLoweredAddresses: self.hasLoweredAddresses)
+  }
+
+  var hasAllowedIndirectConvForClosureSpec: Bool {
+    switch convention {
+    case .indirectInout, .indirectInoutAliasable:
+      return true
+    default:
+      return false
+    }
+  }
+}
+
+private extension ArgumentConvention {
+  var isAllowedIndirectConvForClosureSpec: Bool {
+    switch self {
+    case .indirectInout, .indirectInoutAliasable:
+      return true
+    default:
+      return false
+    }
+  }
+}
+
 private extension PartialApplyInst {
   /// True, if the closure obtained from this partial_apply is the
   /// pullback returned from an autodiff VJP
@@ -617,6 +1034,44 @@ private extension Function {
 }
 
 // ===================== Utility Types ===================== //
+private struct ClosureSpecializationCloner {
+  private var context: FunctionPassContext
+  private var bridged: BridgedClosureSpecializationCloner
+
+  init(emptySpecializedFunction: Function, _ context: FunctionPassContext) {
+    self.context = context
+    self.bridged = BridgedClosureSpecializationCloner(emptySpecializedFunction.bridged)
+  }
+
+  public var cloned: Function {
+    self.bridged.getCloned().function
+  }
+
+  public func getClonedBlock(for originalBlock: BasicBlock) -> BasicBlock {
+    self.bridged.getClonedBasicBlock(originalBlock.bridged).block
+  }
+
+  public func cloneRemainingBody(from originalFunction: Function, entryBlockArgs: [Value]) {
+    entryBlockArgs.withBridgedValues { bridgedEntryBlockArgs in
+      self.bridged.cloneFunctionBody(originalFunction.bridged, self.entryBlock.bridged, bridgedEntryBlockArgs)
+    }
+  }
+}
+
+private enum HashableValue: Hashable {
+  case Argument(FunctionArgument)
+  case Instruction(SingleValueInstruction)
+
+  init(_ value: Value) {
+    if let instr = value as? SingleValueInstruction {
+      self = .Instruction(instr)
+    } else if let arg = value as? FunctionArgument {
+      self = .Argument(arg)
+    } else {
+      fatalError("Invalid hashable value: \(value)")
+    }
+  }
+}
 
 private struct OrderedDict<Key: Hashable, Value> {
   private var valueIndexDict: [Key: Int] = [:]
@@ -659,7 +1114,6 @@ private extension CallSiteMap {
   }
 }
 
-
 /// Represents all the information required to represent a closure in isolation, i.e., outside of a callsite context
 /// where the closure may be getting passed as an argument.
 ///
@@ -681,6 +1135,77 @@ private struct ClosureArgDescriptor {
   /// The index of the closure in the callsite's argument list.
   let closureArgumentIndex: Int
   let parameterInfo: ParameterInfo
+
+  var closure: SingleValueInstruction {
+    closureInfo.closure
+  }
+
+  var isPartialApply: Bool {
+    closure is PartialApplyInst
+  }
+
+  var isPartialApplyOnStack: Bool {
+    if let pai = closure as? PartialApplyInst {
+      return pai.isOnStack
+    }
+    return false
+  }
+
+  var callee: Function {
+    if let pai = closure as? PartialApplyInst {
+      return pai.referencedFunction!
+    } else {
+      return (closure as! ThinToThickFunctionInst).referencedFunction!
+    }
+  }
+
+  var location: Location {
+    closure.location
+  }
+
+  var closureArgIndex: Int {
+    closureArgumentIndex
+  }
+
+  var closureParamInfo: ParameterInfo {
+    parameterInfo
+  }
+
+  var numArguments: Int {
+    if let pai = closure as? PartialApplyInst {
+      return pai.numArguments
+    } else {
+      return 0
+    }
+  }
+
+  var arguments: (some Sequence<Value>)? {
+    if let pai = closure as? PartialApplyInst {
+      return pai.arguments
+    }
+    return nil as LazyMapSequence<OperandArray, Value>?
+  }
+
+  var isClosureGuaranteed: Bool {
+    parameterInfo.convention.isGuaranteed
+  }
+
+  var isClosureConsumed: Bool {
+    parameterInfo.convention.isConsumed
+  }
+
+  var isCalleeTrivialNoEscape: Bool {
+    let closureType = closure.type
+    return closureType.isNoEscapeFunction && closureType.isThickFunction
+  }
+
+  var parentFunction: Function {
+    closure.parentFunction
+  }
+
+  var reachableExitBBs: [BasicBlock] {
+    closure.parentFunction.blocks.filter { $0.isReachableExitBlock }
+  }
 }
 
 /// Represents a callsite containing one or more closure arguments.
@@ -694,6 +1219,54 @@ private struct CallSite {
 
   public mutating func appendClosureArgDescriptor(_ descriptor: ClosureArgDescriptor) {
     self.closureArgDescriptors.append(descriptor)
+  }
+
+  var applyCallee: Function {
+    applySite.referencedFunction!
+  }
+
+  var isCalleeSerialized: Bool {
+    applyCallee.isSerialized
+  }
+
+  var firstClosureArgDesc: ClosureArgDescriptor? {
+    closureArgDescriptors.first
+  }
+
+  func hasClosureArg(at index: Int) -> Bool {
+    closureArgDescriptors.contains { $0.closureArgumentIndex == index }
+  }
+
+  func closureArgDesc(at index: Int) -> ClosureArgDescriptor? {
+    closureArgDescriptors.first { $0.closureArgumentIndex == index }
+  }
+
+  func closureArg(at index: Int) -> SingleValueInstruction? {
+    closureArgDesc(at: index)?.closure
+  }
+
+  func appliedArgForClosure(at index: Int) -> Value? {
+    if let closureArgDesc = closureArgDesc(at: index) {
+      return applySite.arguments[closureArgDesc.closureArgIndex - applySite.unappliedArgumentCount]
+    }
+
+    return nil
+  }
+
+  func closureCallee(at index: Int) -> Function? {
+    closureArgDesc(at: index)?.callee
+  }
+
+  func closureLoc(at index: Int) -> Location? {
+    closureArgDesc(at: index)?.location
+  }
+
+  func specializedCalleeName(_ context: FunctionPassContext) -> String {
+    let closureArgs = Array(self.closureArgDescriptors.map { $0.closure })
+    let closureIndices = Array(self.closureArgDescriptors.map { $0.closureArgIndex })
+
+    return context.mangle(withClosureArgs: closureArgs, closureArgIndices: closureIndices, 
+                          applySiteCallee: applyCallee)
   }
 }
 
@@ -713,4 +1286,17 @@ let gatherCallSitesTest = FunctionTest("closure_specialize_gather_call_sites") {
     }
   }
   print("\n")
+}
+
+let specializedFunctionSignatureAndBodyTest = FunctionTest(
+  "closure_specialize_specialized_function_signature_and_body") { function, arguments, context in
+
+  var callSites = gatherCallSites(in: function, context)
+
+  for callSite in callSites {
+    let specializedFunction = createEmptySpecializedFunction(basedOn: callSite, context)
+    populateBody(of: specializedFunction, basedOn: callSite, context)
+    print("Generated specialized function: \(specializedFunction.name)")
+    print("\(specializedFunction)\n")
+  }
 }
