@@ -1635,6 +1635,9 @@ void BridgedChangeNotificationHandler::notifyChanges(Kind changeKind) const {
   case Kind::effectsChanged:
     invocation->notifyChanges(SILAnalysis::InvalidationKind::Effects);
     break;
+  case Kind::functionBodyChanged:
+    invocation->notifyChanges(SILAnalysis::InvalidationKind::FunctionBody);
+    break;
   }
 }
 

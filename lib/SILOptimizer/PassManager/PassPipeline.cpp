@@ -735,6 +735,17 @@ static void addMidLevelFunctionPipeline(SILPassPipelinePlan &P) {
   P.addLoopUnroll();
 }
 
+static void addAutodiffClosureSpecializationPassPipeline(SILPassPipelinePlan &P) {
+  P.startPipeline("AutodiffClosureSpecialization");
+  P.addDeadStoreElimination();
+  P.addSILCombine();
+  P.addSimplification();
+  
+  P.addAutodiffClosureSpecialization();
+  
+  P.addDeadFunctionAndGlobalElimination();
+}
+
   static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("ClosureSpecialize");
   P.addDeadFunctionAndGlobalElimination();
@@ -1005,9 +1016,13 @@ SILPassPipelinePlan::getPerformancePassPipeline(const SILOptions &Options) {
   if (Options.StopOptimizationAfterSerialization)
     return P;
 
+  addAutodiffClosureSpecializationPassPipeline(P);
+
   // After serialization run the function pass pipeline to iteratively lower
   // high-level constructs like @_semantics calls.
   addMidLevelFunctionPipeline(P);
+
+  addAutodiffClosureSpecializationPassPipeline(P);
 
   // Perform optimizations that specialize.
   addClosureSpecializePassPipeline(P);

@@ -22,7 +22,7 @@ public struct Builder {
     case staticInitializer(GlobalVariable)
   }
 
-  let insertAt: InsertionPoint
+  var insertAt: InsertionPoint
   let location: Location
   private let notificationHandler: BridgedChangeNotificationHandler
   private let notifyNewInstruction: (Instruction) -> ()
@@ -60,6 +60,14 @@ public struct Builder {
     self.location = location;
     self.notifyNewInstruction = notifyNewInstruction
     self.notificationHandler = notificationHandler
+  }
+
+  public mutating func setInsertionPoint(before insPnt: Instruction) {
+    self.insertAt = .before(insPnt)
+  }
+
+  public mutating func setInsertionPoint(atEndOf block: BasicBlock) {
+    self.insertAt = .atEndOf(block)
   }
 
   public func createBuiltinBinaryFunction(name: String,

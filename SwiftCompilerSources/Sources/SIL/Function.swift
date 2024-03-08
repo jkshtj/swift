@@ -35,6 +35,8 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
 
   public var isAutodiffVJP: Bool { bridged.isAutodiffVJP() }
 
+  public var isOptimizable: Bool { bridged.isOptimizable() }
+  
   public var specializationLevel: Int { bridged.specializationLevel() }
   
   public var hasOwnership: Bool { bridged.hasOwnership() }
@@ -64,6 +66,10 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
   public var blocks : BasicBlockList { BasicBlockList(first: bridged.getFirstBlock().block) }
 
   public var entryBlock: BasicBlock { blocks.first! }
+  
+  public var hasSingleBlock: Bool {
+    entryBlock.next == nil
+  }
 
   public var arguments: LazyMapSequence<ArgumentArray, FunctionArgument> {
     entryBlock.arguments.lazy.map { $0 as! FunctionArgument }

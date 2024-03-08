@@ -604,6 +604,7 @@ struct BridgedFunction {
   BRIDGED_INLINE BridgedType getLoweredType(BridgedASTType type) const;
   BRIDGED_INLINE BridgedType getLoweredType(BridgedType type) const;
   BRIDGED_INLINE void setLinkage(Linkage linkage) const;
+  BRIDGED_INLINE bool isOptimizable() const;
   bool isTrapNoReturn() const;
   bool isAutodiffVJP() const;
   SwiftInt specializationLevel() const;
@@ -1317,7 +1318,8 @@ struct BridgedChangeNotificationHandler {
     instructionsChanged,
     callsChanged,
     branchesChanged,
-    effectsChanged
+    effectsChanged,
+    functionBodyChanged
   };
 
   void notifyChanges(Kind changeKind) const;

@@ -334,6 +334,7 @@ struct BridgedPassContext {
   BRIDGED_INLINE void beginTransformFunction(BridgedFunction function) const;
   BRIDGED_INLINE void endTransformFunction() const;
   BRIDGED_INLINE bool continueWithNextSubpassRun(OptionalBridgedInstruction inst) const;
+  BRIDGED_INLINE void addFunctionToPassManagerWorklist(BridgedFunction newFunction, BridgedFunction oldFunction) const;
 
   // SSAUpdater
 

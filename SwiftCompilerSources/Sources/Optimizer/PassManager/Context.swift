@@ -56,6 +56,10 @@ extension Context {
       _bridged.lookupFunction($0).function
     }
   }
+
+  func addFunctionToPassManagerWorklist(newFunction: Function, oldFunction: Function) {
+    _bridged.addFunctionToPassManagerWorklist(newFunction.bridged, oldFunction.bridged)
+  }
 }
 
 /// A context which allows mutation of a function's SIL.
@@ -226,6 +230,10 @@ extension MutatingContext {
 
   func notifyBranchesChanged() {
     _bridged.asNotificationHandler().notifyChanges(.branchesChanged)
+  }
+
+  func notifyFunctionBodyChanged() {
+    _bridged.asNotificationHandler().notifyChanges(.functionBodyChanged)
   }
 
   /// Notifies the pass manager that the optimization result of the current pass depends

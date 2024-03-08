@@ -214,8 +214,6 @@ class SILPerformanceInliner {
 
   bool isAutoDiffLinearMapWithControlFlow(FullApplySite AI);
 
-  bool isTupleWithAllocsOrPartialApplies(SILValue retVal);
-
   bool isProfitableToInline(
       FullApplySite AI, Weight CallerWeight, ConstantTracker &callerTracker,
       int &NumCallerBlocks,
@@ -364,26 +362,20 @@ bool SILPerformanceInliner::isAutoDiffLinearMapWithControlFlow(
   return false;
 }
 
-// Checks if the given value is a tuple containing allocated objects
-// or partial applies.
-//
-// Returns true if the number of allocated objects or partial applies is
-// greater than 0, and false otherwise. 
-// 
-// Returns false if the value is not a tuple.
-bool SILPerformanceInliner::isTupleWithAllocsOrPartialApplies(SILValue val) {
-  if (auto *ti = dyn_cast<TupleInst>(val)) {
-    for (auto i : range(ti->getNumOperands())) {
-      SILValue val = ti->getOperand(i);
-
-      if (auto base = stripFunctionConversions(val))
-        val = base;
-
-      if (isa<AllocationInst>(val) || isa<PartialApplyInst>(val))
-        return true;
+bool isCalleeAutodiffVJP(SILFunction *callee) {
+  swift::Demangle::Context Ctx;
+  if (auto *Root = Ctx.demangleSymbolAsNode(callee->getName())) {
+    if (auto *node = Root->findByKind(swift::Demangle::Node::Kind::AutoDiffFunctionKind, 3)) {
+      if (node->hasIndex()) {
+        auto index = (char)node->getIndex();
+        auto ADFunctionKind = swift::Demangle::AutoDiffFunctionKind(index);   
+        if (ADFunctionKind == swift::Demangle::AutoDiffFunctionKind::VJP) {
+          return true;
+        }
+      }
     }
   }
-
+  
   return false;
 }
 
@@ -394,6 +386,24 @@ bool SILPerformanceInliner::isProfitableToInline(
   SILFunction *Callee = AI.getReferencedFunctionOrNull();
   assert(Callee);
   bool IsGeneric = AI.hasSubstitutions();
+
+  auto isEarlyPerfInlinePass = WhatToInline == InlineSelection::NoSemanticsAndEffects;
+  auto isCalleeVJP = isCalleeAutodiffVJP(Callee);
+  auto callerHasControlFlow = AI.getFunction()->size() > 1;
+
+  // If this is the EarlyPerfInline pass and the callee is a VJP function,
+  // do not inline. We want to have `AutodiffClosureSpecialization` pass optimize
+  // VJPs in isolation before they are inlined into other VJPs or even at 
+  // non-VJP call sites.
+  if (isEarlyPerfInlinePass && isCalleeVJP) {
+    return false;
+  }
+
+  // If this is not the EarlyPerfInline pass and the callee is a VJP function but the 
+  // caller contains control-flow, do not inline.
+  if (!isEarlyPerfInlinePass && isCalleeVJP && callerHasControlFlow) {
+    return false;
+  }
 
   // Start with a base benefit.
   int BaseBenefit = isa<BeginApplyInst>(AI) ? RemovedCoroutineCallBenefit
@@ -610,7 +620,7 @@ bool SILPerformanceInliner::isProfitableToInline(
         // Inlining functions which return an allocated object or partial_apply
         // most likely has a benefit in the caller, because e.g. it can enable
         // de-virtualization.
-        if (isa<AllocationInst>(retVal) || isa<PartialApplyInst>(retVal) || isTupleWithAllocsOrPartialApplies(retVal)) {
+        if (isa<AllocationInst>(retVal) || isa<PartialApplyInst>(retVal)) {
           BlockW.updateBenefit(Benefit, RemovedCallBenefit + 10);
           returnsAllocation = true;
         }

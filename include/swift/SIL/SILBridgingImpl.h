@@ -19,6 +19,7 @@
 #ifndef SWIFT_SIL_SILBRIDGING_IMPL_H
 #define SWIFT_SIL_SILBRIDGING_IMPL_H
 
+#include "SILBridging.h"
 #include "swift/AST/Builtins.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/SubstitutionMap.h"
@@ -718,6 +719,10 @@ bool BridgedFunction::hasValidLinkageForFragileRef() const {
 
 bool BridgedFunction::needsStackProtection() const {
   return getFunction()->needsStackProtection();
+}
+
+bool BridgedFunction::isOptimizable() const {
+  return getFunction()->shouldOptimize();
 }
 
 void BridgedFunction::setNeedStackProtection(bool needSP) const {
