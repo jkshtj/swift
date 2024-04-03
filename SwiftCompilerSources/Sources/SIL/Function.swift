@@ -52,6 +52,10 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
   ///    @substituted <τ_0_0> () -> @out τ_0_0 for <some P>
   public var loweredFunctionType: BridgedASTType { bridged.getLoweredFunctionTypeInContext() }
 
+  public func loweredType(of type: Type) -> Type {
+    bridged.getLoweredType(type.bridged).type
+  }
+
   /// Returns true if the function is a definition and not only an external declaration.
   ///
   /// This is the case if the functioun contains a body, i.e. some basic blocks.
@@ -92,8 +96,6 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
   public var isTransparent: Bool { bridged.isTransparent() }
 
   public var isAsync: Bool { bridged.isAsync() }
-
-  public var isReabstractionThunk: Bool { bridged.isReabstractionThunk() }
 
   /// True if this is a `[global_init]` function.
   ///
@@ -140,7 +142,7 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
     case noThunk, thunk, reabstractionThunk, signatureOptimizedThunk
   }
 
-  var thunkKind: ThunkKind {
+  public var thunkKind: ThunkKind {
     switch bridged.isThunk() {
     case .IsNotThunk:                return .noThunk
     case .IsThunk:                   return .thunk

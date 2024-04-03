@@ -353,6 +353,18 @@ struct FunctionPassContext : MutatingContext {
     return String(taking: _bridged.mangleOutlinedVariable(function.bridged))
   }
 
+  func mangle(withClosureArgs closureArgs: [Value], closureArgIndices: [Int], from applySiteCallee: Function) -> String {
+    closureArgs.withBridgedValues { bridgedClosureArgsRef in
+      closureArgIndices.withBridgedArrayRef{bridgedClosureArgIndicesRef in 
+        String(taking: _bridged.mangleWithClosureArgs(
+          bridgedClosureArgsRef, 
+          bridgedClosureArgIndicesRef, 
+          applySiteCallee.bridged
+        ))
+      }
+    }
+  }
+
   func createGlobalVariable(name: String, type: Type, isPrivate: Bool) -> GlobalVariable {
     let gv = name._withBridgedStringRef {
       _bridged.createGlobalVariable($0, type.bridged, isPrivate)
@@ -628,7 +640,6 @@ extension Function {
     context.notifyEffectsChanged()
     bridged.setIsPerformanceConstraint(isPerformanceConstraint)
   }
-
 
   func fixStackNesting(_ context: FunctionPassContext) {
     context._bridged.fixStackNesting(bridged)

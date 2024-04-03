@@ -15,6 +15,10 @@ import SILBridging
 public struct Location: Equatable, CustomStringConvertible {
   let bridged: BridgedLocation
 
+  public static var compilerGenerated: Location {
+    Location(bridged: BridgedLocation())
+  }
+
   public var description: String {
     return String(taking: bridged.getDebugDescription())
   }

@@ -77,6 +77,10 @@ final public class BasicBlock : CustomStringConvertible, HasShortDescription, Ha
     }
   }
 
+  public var hasKnownTerminator: Bool {
+    isReachableExitBlock || terminator is UnreachableInst
+  }
+
   /// The index of the basic block in its function.
   /// This has O(n) complexity. Only use it for debugging
   public var index: Int {
@@ -121,6 +125,12 @@ public struct InstructionList : CollectionLikeSequence, IteratorProtocol {
   }
 
   public var first: Instruction? { currentInstruction }
+
+  public var last: Instruction? { reversed().first }
+  
+  public var isEmpty: Bool {
+    first == nil
+  }
 
   public func reversed() -> ReverseInstructionList {
     if let inst = currentInstruction {
