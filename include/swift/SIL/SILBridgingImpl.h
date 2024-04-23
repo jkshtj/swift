@@ -1507,6 +1507,10 @@ BridgedWitnessTableEntryArray BridgedDefaultWitnessTable::getEntries() const {
 //                                BridgedBuilder
 //===----------------------------------------------------------------------===//
 
+BridgedBuilder::BridgedBuilder(InsertAt insertAt, BridgedFunction function): 
+  insertAt(insertAt), insertionObj(function.obj), 
+  loc(BridgedLocation({function.getFunction()->getLocation(), function.getFunction()->getDebugScope()})) {}
+
 BridgedInstruction BridgedBuilder::createBuiltinBinaryFunction(BridgedStringRef name,
                                                BridgedType operandType, BridgedType resultType,
                                                BridgedValueArray arguments) const {

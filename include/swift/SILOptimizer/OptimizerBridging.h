@@ -181,10 +181,10 @@ struct BridgedCloner {
   void clone(BridgedInstruction inst);
 };
 
-struct BridgedClosureSpecializationCloner {
+struct BridgedSpecializationCloner {
   swift::ClosureSpecializationCloner * _Nonnull closureSpecCloner;
 
-  BridgedClosureSpecializationCloner(BridgedFunction emptySpecializedFunction);
+  BridgedSpecializationCloner(BridgedFunction emptySpecializedFunction);
   BridgedFunction getCloned() const;
   BridgedBasicBlock getClonedBasicBlock(BridgedBasicBlock originalBasicBlock) const;
   void cloneFunctionBody(BridgedFunction originalFunction, BridgedBasicBlock clonedEntryBlock, BridgedValueArray clonedEntryBlockArgs) const;

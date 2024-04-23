@@ -243,8 +243,7 @@ public final class Undef : Value {
   public var hasTrivialNonPointerType: Bool { false }
 }
 
-public final class PlaceholderValue : Value {
-  public init() {}
+final class PlaceholderValue : Value {
   public var definingInstruction: Instruction? { nil }
 
   public var parentBlock: BasicBlock {

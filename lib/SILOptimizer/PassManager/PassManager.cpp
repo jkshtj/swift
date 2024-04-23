@@ -2145,18 +2145,18 @@ namespace swift {
   };
 } // namespace swift
 
-BridgedClosureSpecializationCloner::BridgedClosureSpecializationCloner(BridgedFunction emptySpecializedFunction): 
+BridgedSpecializationCloner::BridgedSpecializationCloner(BridgedFunction emptySpecializedFunction): 
   closureSpecCloner(new ClosureSpecializationCloner(*emptySpecializedFunction.getFunction())) {}
 
-BridgedFunction BridgedClosureSpecializationCloner::getCloned() const {
+BridgedFunction BridgedSpecializationCloner::getCloned() const {
   return { &closureSpecCloner->getBuilder().getFunction() };
 }
 
-BridgedBasicBlock BridgedClosureSpecializationCloner::getClonedBasicBlock(BridgedBasicBlock originalBasicBlock) const {
+BridgedBasicBlock BridgedSpecializationCloner::getClonedBasicBlock(BridgedBasicBlock originalBasicBlock) const {
   return { closureSpecCloner->getOpBasicBlock(originalBasicBlock.unbridged()) };
 }
 
-void BridgedClosureSpecializationCloner::cloneFunctionBody(BridgedFunction originalFunction, BridgedBasicBlock clonedEntryBlock, BridgedValueArray clonedEntryBlockArgs) const {
+void BridgedSpecializationCloner::cloneFunctionBody(BridgedFunction originalFunction, BridgedBasicBlock clonedEntryBlock, BridgedValueArray clonedEntryBlockArgs) const {
   llvm::SmallVector<swift::SILValue, 16> clonedEntryBlockArgsStorage;
   auto clonedEntryBlockArgsArrayRef = clonedEntryBlockArgs.getValues(clonedEntryBlockArgsStorage);
   closureSpecCloner->cloneFunctionBody(originalFunction.getFunction(), clonedEntryBlock.unbridged(), clonedEntryBlockArgsArrayRef);

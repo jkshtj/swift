@@ -565,6 +565,9 @@ struct BridgedFunction {
     HiddenExternal
   };
 
+  SWIFT_NAME("init(obj:)") 
+  SWIFT_IMPORT_UNSAFE BridgedFunction(SwiftObject obj) : obj(obj) {}
+  SWIFT_IMPORT_UNSAFE BridgedFunction() {}
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE swift::SILFunction * _Nonnull getFunction() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedStringRef getName() const;
   SWIFT_IMPORT_UNSAFE BridgedOwnedString getDebugDescription() const;
@@ -748,11 +751,6 @@ struct BridgedLocation {
   BridgedLocation(const swift::SILDebugLocation &loc) {
     *reinterpret_cast<swift::SILDebugLocation *>(&storage) = loc;
   }
-
-  BridgedLocation() {
-    *reinterpret_cast<swift::SILDebugLocation *>(&storage) = swift::SILDebugLocation();
-  }
-
   const swift::SILDebugLocation &getLoc() const {
     return *reinterpret_cast<const swift::SILDebugLocation *>(&storage);
   }
@@ -1160,7 +1158,7 @@ struct OptionalBridgedDefaultWitnessTable {
 struct BridgedBuilder{
 
   enum class InsertAt {
-    beforeInst, endOfBlock, intoGlobal
+    beforeInst, endOfBlock, startOfFunction, intoGlobal
   } insertAt;
 
   SwiftObject insertionObj;
@@ -1175,6 +1173,8 @@ struct BridgedBuilder{
     case BridgedBuilder::InsertAt::endOfBlock:
       return swift::SILBuilder(BridgedBasicBlock(insertionObj).unbridged(),
                                loc.getLoc().getScope());
+    case BridgedBuilder::InsertAt::startOfFunction:
+      return swift::SILBuilder(BridgedFunction(insertionObj).getFunction()->getEntryBlock());
     case BridgedBuilder::InsertAt::intoGlobal:
       return swift::SILBuilder(BridgedGlobalVar(insertionObj).getGlobal());
     }
@@ -1184,6 +1184,13 @@ struct BridgedBuilder{
   }
 #endif
 
+  SWIFT_NAME("init(insertAt:insertionObj:loc:)") 
+  SWIFT_IMPORT_UNSAFE BridgedBuilder(InsertAt insertAt, SwiftObject insertionObj, BridgedLocation loc):
+    insertAt(insertAt), insertionObj(insertionObj), loc(loc) {}
+
+  SWIFT_NAME("init(insertAt:function:)") 
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedBuilder(InsertAt insertAt, BridgedFunction function);
+  
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createBuiltinBinaryFunction(BridgedStringRef name,
                                           BridgedType operandType, BridgedType resultType,
                                           BridgedValueArray arguments) const;

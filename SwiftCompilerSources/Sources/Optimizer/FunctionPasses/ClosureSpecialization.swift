@@ -95,7 +95,6 @@
 /// }
 /// ```
 
-import OptimizerBridging
 import SIL
 
 private let verbose = false
@@ -182,14 +181,27 @@ private func getOrCreateSpecializedFunction(basedOn callSite: CallSite, _ contex
   let applySiteCallee = callSite.applyCallee
   let specializedParameters = applySiteCallee.convention.getSpecializedParameters(basedOn: callSite)
 
-  let specializedFunction = 
-    context.createAndBuildSpecializedFunction(from: applySiteCallee, withName: specializedFunctionName,
-                                              withParams: specializedParameters, 
-                                              withSerialization: applySiteCallee.isSerialized,
-                                              buildFn: { (emptySpecializedFunction, functionPassContext) in 
-                                                let closureSpecCloner = ClosureSpecializationCloner(emptySpecializedFunction: emptySpecializedFunction, functionPassContext)
-                                                closureSpecCloner.cloneAndSpecializeFunctionBody(using: callSite)
-                                              })
+  let createFn = { (functionPassContext: FunctionPassContext) in 
+    specializedFunctionName._withBridgedStringRef { nameRef in
+      let bridgedParamInfos = specializedParameters.map { $0._bridged }
+
+      return bridgedParamInfos.withUnsafeBufferPointer { paramBuf in
+        functionPassContext
+        ._bridged
+        .ClosureSpecializer_createEmptyFunctionWithSpecializedSignature(nameRef, paramBuf.baseAddress, paramBuf.count, 
+                                                                        applySiteCallee.bridged, 
+                                                                        applySiteCallee.isSerialized)
+        .function
+      }
+    }
+  }
+
+  let buildFn = { (emptySpecializedFunction, functionPassContext) in 
+    let closureSpecCloner = SpecializationCloner(emptySpecializedFunction: emptySpecializedFunction, functionPassContext)
+    closureSpecCloner.cloneAndSpecializeFunctionBody(using: callSite)
+  }
+
+  let specializedFunction = context.createAndBuildSpecializedFunction(createFn: createFn, buildFn: buildFn)
   return (specializedFunction, false)
 }
 
@@ -428,9 +440,9 @@ private func handleApplies(for rootClosure: SingleValueInstruction, callSiteMap:
     // If we are going to need to release the copied over closure, we must make sure that we understand all the exit
     // blocks, i.e., they terminate with an instruction that clearly indicates whether to release the copied over 
     // closure or leak it.
-    if closureParamInfo.convention.isGuaranteed,// || isClosurePassedTrivially,
+    if closureParamInfo.convention.isGuaranteed,
        !onlyHaveThinToThickClosure,
-       !callee.blocks.allSatisfy({ $0.hasKnownTerminator })
+       !callee.blocks.allSatisfy({ $0.isReachableExitBlock || $0.terminator is UnreachableInst })
     {
       continue
     }
@@ -567,15 +579,7 @@ private func markConvertedAndReabstractedClosuresAsUsed(rootClosure: Value, conv
   }
 }
 
-private extension ClosureSpecializationCloner {
-  var entryBlock: BasicBlock {
-    if self.cloned.blocks.isEmpty {
-      self.cloned.appendNewBlock(self.context)
-    } else {
-      self.cloned.entryBlock
-    }
-  }
-
+private extension SpecializationCloner {
   func cloneAndSpecializeFunctionBody(using callSite: CallSite) {
     self.cloneEntryBlockArgsWithoutOrigClosures(usingOrigCalleeAt: callSite)
 
@@ -596,9 +600,9 @@ private extension ClosureSpecializationCloner {
       .enumerated()
       .filter { index, _ in !callSite.hasClosureArg(at: index) }
       .forEach { _, arg in
-        let clonedEntryBlockArgType = clonedFunction.loweredType(of: arg.type)
+        let clonedEntryBlockArgType = arg.type.getLoweredType(in: clonedFunction)
         let clonedEntryBlockArg = clonedEntryBlock.addFunctionArgument(type: clonedEntryBlockArgType, self.context)
-        clonedEntryBlockArg.copyFlags(of: arg as! FunctionArgument)
+        clonedEntryBlockArg.copyFlags(from: arg as! FunctionArgument)
       }
   }
 
@@ -617,7 +621,7 @@ private extension ClosureSpecializationCloner {
     -> (allSpecializedEntryBlockArgs: [Value], 
         closureArgIndexToAllClonedReleasableClosures: [Int: [SingleValueInstruction]]) 
   {
-    func entryBlockArgsWithOrigClosuresSkipped() -> [Value] {
+    func entryBlockArgsWithOrigClosuresSkipped() -> [Value?] {
       var clonedNonClosureEntryBlockArgs = self.entryBlock.arguments.makeIterator()
 
       return callSite.applyCallee
@@ -627,14 +631,14 @@ private extension ClosureSpecializationCloner {
         .reduce(into: []) { result, origArgTuple in
           let (index, _) = origArgTuple
           if !callSite.hasClosureArg(at: index) {
-            result.append(clonedNonClosureEntryBlockArgs.next()!)
+            result.append(clonedNonClosureEntryBlockArgs.next())
           } else {
-            result.append(PlaceholderValue())
+            result.append(Optional.none)
           }
         }
     }
 
-    var entryBlockArgs: [Value] = entryBlockArgsWithOrigClosuresSkipped()
+    var entryBlockArgs: [Value?] = entryBlockArgsWithOrigClosuresSkipped()
     var closureArgIndexToAllClonedReleasableClosures: [Int: [SingleValueInstruction]] = [:]
 
     for closureArgDesc in callSite.closureArgDescriptors {
@@ -645,22 +649,20 @@ private extension ClosureSpecializationCloner {
       closureArgIndexToAllClonedReleasableClosures[closureArgDesc.closureArgIndex] = allClonedReleasableClosures
     }
 
-    return (entryBlockArgs, closureArgIndexToAllClonedReleasableClosures)
+    return (entryBlockArgs.map { $0! }, closureArgIndexToAllClonedReleasableClosures)
   }
 
   private func cloneClosureChain(representedBy closureArgDesc: ClosureArgDescriptor, at callSite: CallSite) 
     -> (finalClonedReabstractedClosure: SingleValueInstruction, allClonedReleasableClosures: [SingleValueInstruction]) 
   {
     let (origToClonedValueMap, capturedArgRange) = self.addEntryBlockArgs(forValuesCapturedBy: closureArgDesc)
-
+    let clonedFunction = self.cloned
     let clonedEntryBlock = self.entryBlock
     let clonedClosureArgs = Array(clonedEntryBlock.arguments[capturedArgRange])
 
-    let location = clonedEntryBlock.instructions.isEmpty 
-                   ? Location.compilerGenerated 
-                   : clonedEntryBlock.instructions.last!.location
-
-    let builder = Builder(atEndOf: clonedEntryBlock, location: location, self.context)
+    let builder = clonedEntryBlock.instructions.isEmpty
+                  ? Builder(atStartOf: clonedFunction, self.context)
+                  : Builder(atEndOf: clonedEntryBlock, location: clonedEntryBlock.instructions.last!.location, self.context)
 
     let clonedRootClosure = builder.cloneRootClosure(representedBy: closureArgDesc, capturedArgs: clonedClosureArgs)
 
@@ -676,12 +678,6 @@ private extension ClosureSpecializationCloner {
     return (finalClonedReabstractedClosure, allClonedReleasableClosures)
   }
 
-  private func cloneFunctionBody(from originalFunction: Function, entryBlockArgs: [Value]) {
-    entryBlockArgs.withBridgedValues { bridgedEntryBlockArgs in
-      self.bridged.cloneFunctionBody(originalFunction.bridged, self.entryBlock.bridged, bridgedEntryBlockArgs)
-    }
-  }
-
   private func addEntryBlockArgs(forValuesCapturedBy closureArgDesc: ClosureArgDescriptor) 
     -> (origToClonedValueMap: [HashableValue: Value], capturedArgRange: Range<Int>) 
   {
@@ -694,7 +690,8 @@ private extension ClosureSpecializationCloner {
       let capturedArgRangeStart = clonedEntryBlock.arguments.count
 
       for arg in capturedArgs {
-        let capturedArg = clonedEntryBlock.addFunctionArgument(type: clonedFunction.loweredType(of: arg.type), self.context)
+        let capturedArg = clonedEntryBlock.addFunctionArgument(type: arg.type.getLoweredType(in: clonedFunction), 
+                                                               self.context)
         origToClonedValueMap[arg] = capturedArg
       }
 
@@ -719,12 +716,12 @@ private extension ClosureSpecializationCloner {
       {
         for exitBlock in closureArgDesc.reachableExitBBs {
           let clonedExitBlock = self.getClonedBlock(for: exitBlock)
+          
+          let terminator = clonedExitBlock.terminator is UnreachableInst
+                           ? clonedExitBlock.terminator.previous!
+                           : clonedExitBlock.terminator
 
-          let builder = if clonedExitBlock.terminator is UnreachableInst {
-            Builder(before: clonedExitBlock.terminator.previous! as! ApplyInst, self.context)
-          } else {
-            Builder(atEndOf: clonedExitBlock, location: clonedExitBlock.terminator.location, self.context)
-          }
+          let builder = Builder(before: terminator, self.context)
 
           for closure in allClonedReleasableClosures {
             if let pai = closure as? PartialApplyInst,
@@ -842,32 +839,6 @@ private extension Builder {
     }
 
     self.createDestroyValue(operand: paiOnStack)
-  }
-}
-
-private extension FunctionPassContext {
-  func createAndBuildSpecializedFunction(from applySiteCallee: Function, withName specializedFunctionName: String, 
-                                         withParams specializedParameters: [ParameterInfo], withSerialization isSerialized: Bool,
-                                         buildFn: (Function, FunctionPassContext) -> ()) -> Function {
-    return specializedFunctionName._withBridgedStringRef { nameRef in
-      let bridgedParamInfos = specializedParameters.map { $0._bridged }
-
-      let specializedFunction = bridgedParamInfos.withUnsafeBufferPointer { paramBuf in
-        _bridged.ClosureSpecializer_createEmptyFunctionWithSpecializedSignature(nameRef, paramBuf.baseAddress, 
-                                                                                paramBuf.count, 
-                                                                                applySiteCallee.bridged, 
-                                                                                isSerialized).function
-      }
-
-      let nestedFunctionPassContext = 
-        FunctionPassContext(_bridged: _bridged.initializeNestedPassContext(specializedFunction.bridged))
-
-      defer { _bridged.deinitializedNestedPassContext() }
-
-      buildFn(specializedFunction, nestedFunctionPassContext)
-
-      return specializedFunction
-    }
   }
 }
 
@@ -1020,24 +991,6 @@ private extension Function {
 }
 
 // ===================== Utility Types ===================== //
-private struct ClosureSpecializationCloner {
-  private var context: FunctionPassContext
-  private var bridged: BridgedClosureSpecializationCloner
-
-  init(emptySpecializedFunction: Function, _ context: FunctionPassContext) {
-    self.context = context
-    self.bridged = BridgedClosureSpecializationCloner(emptySpecializedFunction.bridged)
-  }
-
-  public var cloned: Function {
-    self.bridged.getCloned().function
-  }
-
-  public func getClonedBlock(for originalBlock: BasicBlock) -> BasicBlock {
-    self.bridged.getClonedBasicBlock(originalBlock.bridged).block
-  }
-}
-
 private enum HashableValue: Hashable {
   case Argument(FunctionArgument)
   case Instruction(SingleValueInstruction)

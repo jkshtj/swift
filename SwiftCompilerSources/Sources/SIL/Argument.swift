@@ -70,7 +70,12 @@ final public class FunctionArgument : Argument {
     parentFunction.argumentConventions[resultDependsOn: index]
   }
 
-  public func copyFlags(of arg: FunctionArgument) {
+  /// Copies the following flags from `arg`:
+  /// 1. noImplicitCopy
+  /// 2. lifetimeAnnotation
+  /// 3. closureCapture
+  /// 4. parameterPack
+  public func copyFlags(from arg: FunctionArgument) {
     bridged.copyFlags(arg.bridged)
   }
 }
@@ -451,10 +456,12 @@ public enum ArgumentConvention : CustomStringConvertible {
 
   public var isConsumed: Bool {
     switch self {
-      case .indirectIn, .directOwned, .packOwned:
-        return true
-      default:
-        return false
+    case .indirectIn, .directOwned, .packOwned:
+      return true
+    case .indirectInGuaranteed, .directGuaranteed, .packGuaranteed,
+          .indirectInout, .indirectInoutAliasable, .indirectOut,
+          .packOut, .packInout, .directUnowned:
+      return false
     }
   }
 
