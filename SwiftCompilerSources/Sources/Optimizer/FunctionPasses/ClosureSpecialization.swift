@@ -181,27 +181,17 @@ private func getOrCreateSpecializedFunction(basedOn callSite: CallSite, _ contex
   let applySiteCallee = callSite.applyCallee
   let specializedParameters = applySiteCallee.convention.getSpecializedParameters(basedOn: callSite)
 
-  let createFn = { (functionPassContext: FunctionPassContext) in 
-    specializedFunctionName._withBridgedStringRef { nameRef in
-      let bridgedParamInfos = specializedParameters.map { $0._bridged }
+  let specializedFunction = 
+    context.createFunctionForClosureSpecialization(from: applySiteCallee, withName: specializedFunctionName, 
+                                                   withParams: specializedParameters, 
+                                                   withSerialization: applySiteCallee.isSerialized)
 
-      return bridgedParamInfos.withUnsafeBufferPointer { paramBuf in
-        functionPassContext
-        ._bridged
-        .ClosureSpecializer_createEmptyFunctionWithSpecializedSignature(nameRef, paramBuf.baseAddress, paramBuf.count, 
-                                                                        applySiteCallee.bridged, 
-                                                                        applySiteCallee.isSerialized)
-        .function
-      }
-    }
-  }
+  context.buildSpecializedFunction(specializedFunction: specializedFunction,
+                                   buildFn: { (emptySpecializedFunction, functionPassContext) in 
+                                      let closureSpecCloner = SpecializationCloner(emptySpecializedFunction: emptySpecializedFunction, functionPassContext)
+                                      closureSpecCloner.cloneAndSpecializeFunctionBody(using: callSite)
+                                   })
 
-  let buildFn = { (emptySpecializedFunction, functionPassContext) in 
-    let closureSpecCloner = SpecializationCloner(emptySpecializedFunction: emptySpecializedFunction, functionPassContext)
-    closureSpecCloner.cloneAndSpecializeFunctionBody(using: callSite)
-  }
-
-  let specializedFunction = context.createAndBuildSpecializedFunction(createFn: createFn, buildFn: buildFn)
   return (specializedFunction, false)
 }
 
@@ -475,7 +465,6 @@ private func handleApplies(for rootClosure: SingleValueInstruction, callSiteMap:
       continue
     }
 
-    // Mark the converted/reabstracted closures as used.
     if haveUsedReabstraction {
       markConvertedAndReabstractedClosuresAsUsed(rootClosure: rootClosure, convertedAndReabstractedClosure: use.value, 
                                                  convertedAndReabstractedClosures: &convertedAndReabstractedClosures)
@@ -668,9 +657,7 @@ private extension SpecializationCloner {
 
     let (finalClonedReabstractedClosure, releasableClonedReabstractedClosures) = 
       builder.cloneRootClosureReabstractions(rootClosure: closureArgDesc.closure, clonedRootClosure: clonedRootClosure,
-                                             reabstractedClosure: callSite
-                                                                    .appliedArgForClosure(
-                                                                      at: closureArgDesc.closureArgIndex)!,
+                                             reabstractedClosure: callSite.appliedArgForClosure(at: closureArgDesc.closureArgIndex)!,
                                              origToClonedValueMap: origToClonedValueMap,
                                              self.context)
 
@@ -711,7 +698,7 @@ private extension SpecializationCloner {
       // Insert a `destroy_value`, for all releasable closures, in all reachable exit BBs if the closure was passed as a
       // guaranteed parameter or its type was noescape+thick. This is b/c the closure was passed at +0 originally and we
       // need to balance the initial increment of the newly created closure(s).
-      if closureArgDesc.isClosureGuaranteed || closureArgDesc.isClosureTrivialNoEscape,
+      if closureArgDesc.isClosureGuaranteed || closureArgDesc.parameterInfo.isTrivialNoescapeClosure,
          !allClonedReleasableClosures.isEmpty
       {
         for exitBlock in closureArgDesc.reachableExitBBs {
@@ -741,10 +728,10 @@ private extension SpecializationCloner {
 private extension [HashableValue: Value] {
   subscript(key: Value) -> Value? {
     get {
-      self[HashableValue(key)]
+      self[key.hashable]
     }
     set {
-      self[HashableValue(key)] = newValue
+      self[key.hashable] = newValue
     }
   }
 }
@@ -756,8 +743,8 @@ private extension Builder {
     let function = self.createFunctionRef(closureArgDesc.callee)
 
     if let pai = closureArgDesc.closure as? PartialApplyInst {
-      return self.createPartialApply(forFunction: function, substitutionMap: SubstitutionMap(), 
-                                     capturedArgs: capturedArgs, calleeConvention: pai.calleeConvention,
+      return self.createPartialApply(function: function, substitutionMap: SubstitutionMap(), 
+                                     capturedArguments: capturedArgs, calleeConvention: pai.calleeConvention,
                                      hasUnknownResultIsolation: pai.hasUnknownResultIsolation, 
                                      isOnStack: pai.isOnStack)
     } else {
@@ -802,8 +789,8 @@ private extension Builder {
           }
 
           let fri = self.createFunctionRef(function)
-          let reabstracted = self.createPartialApply(forFunction: fri, substitutionMap: SubstitutionMap(), 
-                                                     capturedArgs: [toBeReabstracted], 
+          let reabstracted = self.createPartialApply(function: fri, substitutionMap: SubstitutionMap(), 
+                                                     capturedArguments: [toBeReabstracted], 
                                                      calleeConvention: pai.calleeConvention, 
                                                      hasUnknownResultIsolation: pai.hasUnknownResultIsolation, 
                                                      isOnStack: pai.isOnStack)
@@ -891,7 +878,7 @@ private extension FunctionConvention {
 private extension ParameterInfo {
   func withSpecializedConvention(isArgTypeTrivial: Bool) -> Self {
     let specializedParamConvention =
-      if self.hasAllowedIndirectConvForClosureSpec {
+      if self.convention.isAllowedIndirectConvForClosureSpec {
         self.convention
       } else {
         isArgTypeTrivial ? ArgumentConvention.directUnowned : ArgumentConvention.directOwned
@@ -901,13 +888,8 @@ private extension ParameterInfo {
                          hasLoweredAddresses: self.hasLoweredAddresses)
   }
 
-  var hasAllowedIndirectConvForClosureSpec: Bool {
-    switch convention {
-    case .indirectInout, .indirectInoutAliasable:
-      return true
-    default:
-      return false
-    }
+  var isTrivialNoescapeClosure: Bool {
+    self.type.SILFunctionType_isTrivialNoescape()
   }
 }
 
@@ -991,21 +973,6 @@ private extension Function {
 }
 
 // ===================== Utility Types ===================== //
-private enum HashableValue: Hashable {
-  case Argument(FunctionArgument)
-  case Instruction(SingleValueInstruction)
-
-  init(_ value: Value) {
-    if let instr = value as? SingleValueInstruction {
-      self = .Instruction(instr)
-    } else if let arg = value as? FunctionArgument {
-      self = .Argument(arg)
-    } else {
-      fatalError("Invalid hashable value: \(value)")
-    }
-  }
-}
-
 private struct OrderedDict<Key: Hashable, Value> {
   private var valueIndexDict: [Key: Int] = [:]
   private var entryList: [(Key, Value)] = []
@@ -1073,10 +1040,6 @@ private struct ClosureArgDescriptor {
     closureInfo.closure
   }
 
-  var isPartialApply: Bool {
-    closure is PartialApplyInst
-  }
-
   var isPartialApplyOnStack: Bool {
     if let pai = closure as? PartialApplyInst {
       return pai.isOnStack
@@ -1127,14 +1090,6 @@ private struct ClosureArgDescriptor {
     closureParamInfo.convention.isConsumed
   }
 
-  var isClosureTrivialNoEscape: Bool {
-    closureParamInfo.type.SILFunctionType_isTrivialNoescape()
-  }
-
-  var parentFunction: Function {
-    closure.parentFunction
-  }
-
   var reachableExitBBs: [BasicBlock] {
     closure.parentFunction.blocks.filter { $0.isReachableExitBlock }
   }
@@ -1157,14 +1112,6 @@ private struct CallSite {
     applySite.referencedFunction!
   }
 
-  var isCalleeSerialized: Bool {
-    applyCallee.isSerialized
-  }
-
-  var firstClosureArgDesc: ClosureArgDescriptor? {
-    closureArgDescriptors.first
-  }
-
   func hasClosureArg(at index: Int) -> Bool {
     closureArgDescriptors.contains { $0.closureArgumentIndex == index }
   }
@@ -1173,24 +1120,12 @@ private struct CallSite {
     closureArgDescriptors.first { $0.closureArgumentIndex == index }
   }
 
-  func closureArg(at index: Int) -> SingleValueInstruction? {
-    closureArgDesc(at: index)?.closure
-  }
-
   func appliedArgForClosure(at index: Int) -> Value? {
     if let closureArgDesc = closureArgDesc(at: index) {
       return applySite.arguments[closureArgDesc.closureArgIndex - applySite.unappliedArgumentCount]
     }
 
     return nil
-  }
-
-  func closureCallee(at index: Int) -> Function? {
-    closureArgDesc(at: index)?.callee
-  }
-
-  func closureLoc(at index: Int) -> Location? {
-    closureArgDesc(at: index)?.location
   }
 
   func specializedCalleeName(_ context: FunctionPassContext) -> String {
